@@ -17,6 +17,12 @@ public class TabletHelperSettings : ISettings
     public ToggleNode ShowUsesLeft { get; set; } = new ToggleNode(false);
     public ToggleNode HideWhenTooltipOverItem { get; set; } = new ToggleNode(true);
 
+    public TabletHighlightMode HighlightMode { get; set; } = TabletHighlightMode.Border;
+    public TabletLabelTextMode LabelTextMode { get; set; } = TabletLabelTextMode.GroupColor;
+    public ToggleNode LabelBackgroundEnabled { get; set; } = new ToggleNode(true);
+    public ToggleNode LabelOutlineEnabled { get; set; } = new ToggleNode(true);
+    public RangeNode<int> LabelBackgroundAlpha { get; set; } = new RangeNode<int>(170, 0, 255);
+
     public ToggleNode SmoothUiRefresh { get; set; } = new ToggleNode(true);
     public RangeNode<int> FastRefreshIntervalMs { get; set; } = new RangeNode<int>(60, 16, 250);
     public RangeNode<int> ScanIntervalMs { get; set; } = new RangeNode<int>(30, 16, 2000);
@@ -34,6 +40,29 @@ public class TabletHelperSettings : ISettings
 
     public void EnsureDefaults()
     {
+        Enable ??= new ToggleNode(true);
+        OverlayEnabled ??= new ToggleNode(true);
+        ShowGroupLabel ??= new ToggleNode(true);
+        ShowUsesLeft ??= new ToggleNode(false);
+        HideWhenTooltipOverItem ??= new ToggleNode(true);
+        LabelBackgroundEnabled ??= new ToggleNode(true);
+        LabelOutlineEnabled ??= new ToggleNode(true);
+        LabelBackgroundAlpha ??= new RangeNode<int>(170, 0, 255);
+        SmoothUiRefresh ??= new ToggleNode(true);
+        FastRefreshIntervalMs ??= new RangeNode<int>(60, 16, 250);
+        ScanIntervalMs ??= new RangeNode<int>(30, 16, 2000);
+        ItemsPerTick ??= new RangeNode<int>(20, 1, 200);
+        BorderThickness ??= new RangeNode<int>(3, 1, 8);
+        LabelScale ??= new RangeNode<float>(1.0f, 0.5f, 2.0f);
+        LogSeenMods ??= new ToggleNode(false);
+        UseDirectSpecialStashPath ??= new ToggleNode(true);
+        AllowSpecialStashDeepFallback ??= new ToggleNode(false);
+
+        if (!Enum.IsDefined(typeof(TabletHighlightMode), HighlightMode))
+            HighlightMode = TabletHighlightMode.Border;
+        if (!Enum.IsDefined(typeof(TabletLabelTextMode), LabelTextMode))
+            LabelTextMode = TabletLabelTextMode.GroupColor;
+
         var existingTypes = TabletTypes ?? new List<TabletTypeSettings>();
         var rebuilt = new List<TabletTypeSettings>();
 
@@ -119,7 +148,17 @@ public class TabletRuleGroup
     public int MinimumUsesLeft { get; set; } = 1;
     public int ColorArgb { get; set; } = Color.DeepSkyBlue.ToArgb();
     public bool HighlightPriority { get; set; } = false;
+
+    // Primary "match" set. The group highlights when at least MinimumMatchedBonuses of these are present.
     public List<string> SelectedBonusIds { get; set; } = new List<string>();
+
+    // Optional "AND" gate. When non-empty, the tablet must also carry at least
+    // MinimumRequiredBonuses of these. Empty means the gate is skipped (backward compatible).
+    public List<string> RequiredBonusIds { get; set; } = new List<string>();
+    public int MinimumRequiredBonuses { get; set; } = 1;
+
+    // Optional "NOT" gate. When non-empty, the tablet is skipped if it carries any of these.
+    public List<string> ExcludedBonusIds { get; set; } = new List<string>();
 
     [JsonIgnore]
     public Color Color
@@ -136,10 +175,27 @@ public class TabletRuleGroup
             Name = "New Group";
         if (MinimumMatchedBonuses < 1)
             MinimumMatchedBonuses = 1;
+        if (MinimumRequiredBonuses < 1)
+            MinimumRequiredBonuses = 1;
         if (MinimumUsesLeft < 0)
             MinimumUsesLeft = 0;
         SelectedBonusIds ??= new List<string>();
+        RequiredBonusIds ??= new List<string>();
+        ExcludedBonusIds ??= new List<string>();
     }
+}
+
+public enum TabletHighlightMode
+{
+    Border = 0,
+    Cross = 1,
+    Star = 2
+}
+
+public enum TabletLabelTextMode
+{
+    White = 0,
+    GroupColor = 1
 }
 
 internal static class TabletTypeKeys

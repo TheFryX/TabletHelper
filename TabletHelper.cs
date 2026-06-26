@@ -30,7 +30,7 @@ public class TabletHelper : BaseSettingsPlugin<TabletHelperSettings>
     private readonly HashSet<string> _collapsedSettingsNodesThisSession = new HashSet<string>(StringComparer.Ordinal);
     private readonly HashSet<string> _newlyAddedGroupsToOpen = new HashSet<string>(StringComparer.Ordinal);
 
-    private const string PluginVersion = "v1.3";
+    private const string PluginVersion = "v1.4";
 
     // Legacy full path is kept as a fallback. The preferred path is dynamic:
     // StashElement.StashInventoryPanel.Children[IndexVisibleStash] -> 0 -> 0 -> 0 -> 1 -> 0 -> 0 -> 0.
@@ -131,40 +131,29 @@ public class TabletHelper : BaseSettingsPlugin<TabletHelperSettings>
             ? hover
             : null;
 
-        IDisposable? textScaleScope = null;
-        try
+        foreach (var tablet in _tablets.Values)
         {
-            if (Settings.ShowGroupLabel.Value)
-                textScaleScope = Graphics.SetTextScale(Settings.LabelScale.Value);
+            if (tablet == null || !TabletBonusCatalog.IsKnownTabletType(tablet.TabletTypeKey) || !IsUsableRect(tablet.Rect))
+                continue;
 
-            foreach (var tablet in _tablets.Values)
+            if (hoveredItemTooltip != null)
             {
-                if (tablet == null || !TabletBonusCatalog.IsKnownTabletType(tablet.TabletTypeKey) || !IsUsableRect(tablet.Rect))
+                var tooltip = hoveredItemTooltip.GetClientRectCache;
+                tooltip.Inflate(-10, -10);
+                if (tooltip.Intersects(tablet.Rect))
                     continue;
-
-                if (hoveredItemTooltip != null)
-                {
-                    var tooltip = hoveredItemTooltip.GetClientRectCache;
-                    tooltip.Inflate(-10, -10);
-                    if (tooltip.Intersects(tablet.Rect))
-                        continue;
-                }
-
-                var matches = FindMatches(tablet);
-                if (matches.Count == 0)
-                    continue;
-
-                // Priority groups are ordered before normal matches, so the first match controls
-                // the highlight color while all matching group names remain visible on the label.
-                DrawHighlight(tablet.Rect, matches[0].Group.Color, tablet.Location);
-
-                if (Settings.ShowGroupLabel.Value && tablet.Location != ItemLocation.QuadStash)
-                    DrawGroupLabels(tablet, matches);
             }
-        }
-        finally
-        {
-            textScaleScope?.Dispose();
+
+            var matches = FindMatches(tablet);
+            if (matches.Count == 0)
+                continue;
+
+            // Priority groups are ordered before normal matches, so the first match controls
+            // the highlight color while all matching group names remain visible on the label.
+            DrawHighlight(tablet, matches);
+
+            if (Settings.ShowGroupLabel.Value && tablet.Location != ItemLocation.QuadStash)
+                DrawGroupLabels(tablet, matches);
         }
     }
 
@@ -194,15 +183,24 @@ public class TabletHelper : BaseSettingsPlugin<TabletHelperSettings>
         Checkbox("Hide overlay when item tooltip covers item", Settings.HideWhenTooltipOverItem);
 
         ImGui.Separator();
+        DrawEnumCombo("Highlight style", Settings.HighlightMode, v => Settings.HighlightMode = v);
+        SliderInt("Highlight thickness", Settings.BorderThickness);
+        ImGui.TextDisabled("Border draws the classic item frame. Cross draws an X over the tablet. Star draws a marker in the top-left corner.");
+
+        ImGui.Separator();
+        DrawEnumCombo("Label text color", Settings.LabelTextMode, v => Settings.LabelTextMode = v);
+        Checkbox("Label dark background", Settings.LabelBackgroundEnabled);
+        Checkbox("Label black outline", Settings.LabelOutlineEnabled);
+        if (Settings.LabelBackgroundEnabled.Value)
+            SliderInt("Label background alpha", Settings.LabelBackgroundAlpha);
+        SliderFloat("Label scale", Settings.LabelScale);
+
+        ImGui.Separator();
         Checkbox("Smooth overlay refresh", Settings.SmoothUiRefresh);
         SliderInt("Known tablet rect refresh interval ms", Settings.FastRefreshIntervalMs);
         SliderInt("Full discovery scan interval ms", Settings.ScanIntervalMs);
         SliderInt("Items parsed per tick", Settings.ItemsPerTick);
         ImGui.TextDisabled("Fast refresh only updates already known tablet rectangles. Full discovery finds new/missing items at a lower rate.");
-
-        ImGui.Separator();
-        SliderInt("Border thickness", Settings.BorderThickness);
-        SliderFloat("Label scale", Settings.LabelScale);
 
         ImGui.TextDisabled($"Cached tablets: {_tablets.Count}, pending: {_pending.Count}");
         ImGui.Unindent();
@@ -271,8 +269,7 @@ public class TabletHelper : BaseSettingsPlugin<TabletHelperSettings>
         group.EnsureDefaults();
 
         ImGui.PushID(group.Id);
-        var selectedCount = group.SelectedBonusIds?.Count ?? 0;
-        var header = $"{group.Name}  [{selectedCount} selected]";
+        var header = BuildGroupHeader(group);
 
         var groupCollapseKey = "group:" + group.Id;
         if (_newlyAddedGroupsToOpen.Remove(group.Id))
@@ -343,14 +340,6 @@ public class TabletHelper : BaseSettingsPlugin<TabletHelperSettings>
                 MarkMatchingSettingsChanged();
             }
 
-            var minBonuses = group.MinimumMatchedBonuses;
-            ImGui.SetNextItemWidth(90);
-            if (ImGui.InputInt("Minimum matched bonuses", ref minBonuses, 1, 1))
-            {
-                group.MinimumMatchedBonuses = Math.Clamp(minBonuses, 1, 20);
-                MarkMatchingSettingsChanged();
-            }
-
             var minUses = group.MinimumUsesLeft;
             ImGui.SetNextItemWidth(90);
             if (ImGui.InputInt("Minimum uses left", ref minUses, 1, 1))
@@ -362,69 +351,218 @@ public class TabletHelper : BaseSettingsPlugin<TabletHelperSettings>
             if (DrawColorEdit("Group color", group.Color, c => group.Color = c))
                 MarkMatchingSettingsChanged();
 
-            var searchKey = typeSettings.Key + ":" + group.Id;
-            if (!_bonusSearch.TryGetValue(searchKey, out var search))
-                search = string.Empty;
-
-            ImGui.SetNextItemWidth(320);
-            if (ImGui.InputText("Search bonuses", ref search, 128))
-                _bonusSearch[searchKey] = search;
-
-            ImGui.SameLine();
-            if (ImGui.SmallButton("Clear All"))
+            ImGui.Spacing();
+            if (ImGui.BeginTabBar("##bonus_role_tabs", ImGuiTabBarFlags.None))
             {
-                group.SelectedBonusIds.Clear();
-                MarkMatchingSettingsChanged();
+                DrawBonusRoleTab(typeSettings.Key, group, BonusRole.Match);
+                DrawBonusRoleTab(typeSettings.Key, group, BonusRole.Require);
+                DrawBonusRoleTab(typeSettings.Key, group, BonusRole.Exclude);
+                ImGui.EndTabBar();
             }
-
-            DrawBonusList(typeSettings.Key, group, search);
 
             ImGui.TreePop();
         }
         ImGui.PopID();
     }
 
-    private void DrawBonusList(string tabletTypeKey, TabletRuleGroup group, string search)
+    private void DrawBonusRoleTab(string tabletTypeKey, TabletRuleGroup group, BonusRole role)
+    {
+        var list = GetBonusRoleList(group, role);
+        var accent = GetBonusRoleAccent(role);
+
+        var title = role switch
+        {
+            BonusRole.Require => $"Require ({list.Count})###tab_require",
+            BonusRole.Exclude => $"Exclude ({list.Count})###tab_exclude",
+            _ => $"Match ({list.Count})###tab_match"
+        };
+
+        // Tint only the tab label, not the tab body.
+        ImGui.PushStyleColor(ImGuiCol.Text, accent);
+        var open = ImGui.BeginTabItem(title);
+        ImGui.PopStyleColor();
+        if (!open)
+            return;
+
+        switch (role)
+        {
+            case BonusRole.Require:
+                HelpText("Tablet must also have at least the set number of these (AND). Leave empty to ignore.");
+                DrawMinimumInput("Minimum required", group.MinimumRequiredBonuses, v => group.MinimumRequiredBonuses = v);
+                break;
+            case BonusRole.Exclude:
+                if (group.SelectedBonusIds.Count == 0)
+                    HelpText("This group has no Match bonuses, so it is a blocklist: a tablet with any of these is never highlighted (Global tab blocks every tablet; a tablet tab blocks that type).");
+                else
+                    HelpText("Skip this group's highlight if the tablet has any of these (NOT). Exclude does not remove Match or Require selections; clearing Exclude restores the previous highlight behavior.");
+                break;
+            default:
+                HelpText("Highlight when at least the set number of these are present.");
+                if (group.SelectedBonusIds.Count == 0 && group.ExcludedBonusIds.Count > 0)
+                    HelpText("Empty + Exclude set = this group is acting as a blocklist (see the Exclude tab).");
+                DrawMinimumInput("Minimum to match", group.MinimumMatchedBonuses, v => group.MinimumMatchedBonuses = v);
+                break;
+        }
+
+        var searchKey = tabletTypeKey + ":" + group.Id + ":" + role;
+        if (!_bonusSearch.TryGetValue(searchKey, out var search))
+            search = string.Empty;
+
+        ImGui.SetNextItemWidth(300);
+        if (ImGui.InputText("Search##" + role, ref search, 128))
+            _bonusSearch[searchKey] = search;
+
+        ImGui.SameLine();
+        if (ImGui.SmallButton("Clear##" + role) && list.Count > 0)
+        {
+            list.Clear();
+            MarkMatchingSettingsChanged();
+        }
+
+        DrawBonusChecklist(tabletTypeKey, group, role, search);
+
+        ImGui.EndTabItem();
+    }
+
+    private void DrawBonusChecklist(string tabletTypeKey, TabletRuleGroup group, BonusRole role, string search)
     {
         var bonuses = TabletBonusCatalog.GetBonusesFor(tabletTypeKey)
-            .Where(b => string.IsNullOrWhiteSpace(search) || b.Label.Contains(search, StringComparison.OrdinalIgnoreCase) || b.Category.Contains(search, StringComparison.OrdinalIgnoreCase) || b.Id.Contains(search, StringComparison.OrdinalIgnoreCase))
+            .Where(b => string.IsNullOrWhiteSpace(search)
+                || b.Label.Contains(search, StringComparison.OrdinalIgnoreCase)
+                || b.Category.Contains(search, StringComparison.OrdinalIgnoreCase)
+                || b.Id.Contains(search, StringComparison.OrdinalIgnoreCase))
             .ToList();
 
-        var selected = group.SelectedBonusIds ??= new List<string>();
+        var list = GetBonusRoleList(group, role);
+        var accent = GetBonusRoleAccent(role);
 
-        var childHeight = Math.Clamp(bonuses.Count * 24 + 28, 140, 420);
-        var childVisible = ImGui.BeginChild("##bonus_list", new Vector2(0, childHeight), ImGuiChildFlags.Border);
+        var childHeight = Math.Clamp(bonuses.Count * 24 + 28, 140, 360);
+        var childVisible = ImGui.BeginChild("##bonus_list_" + role, new Vector2(0, childHeight), ImGuiChildFlags.Border);
         if (childVisible)
         {
+            ImGui.PushStyleColor(ImGuiCol.CheckMark, accent);
+
             foreach (var bonus in bonuses)
             {
-                var isSelected = selected.Contains(bonus.Id, StringComparer.OrdinalIgnoreCase);
-                if (ImGui.Checkbox($"{bonus.Label}##{bonus.Id}", ref isSelected))
-                {
-                    if (isSelected)
-                    {
-                        if (!selected.Contains(bonus.Id, StringComparer.OrdinalIgnoreCase))
-                        {
-                            selected.Add(bonus.Id);
-                            MarkMatchingSettingsChanged();
-                        }
-                    }
-                    else
-                    {
-                        if (selected.RemoveAll(x => string.Equals(x, bonus.Id, StringComparison.OrdinalIgnoreCase)) > 0)
-                            MarkMatchingSettingsChanged();
-                    }
-                }
+                var isSelected = list.Contains(bonus.Id, StringComparer.OrdinalIgnoreCase);
+                if (ImGui.Checkbox($"{bonus.Label}##{role}_{bonus.Id}", ref isSelected))
+                    SetBonusRole(group, role, bonus.Id, isSelected);
 
                 if (ImGui.IsItemHovered())
-                    ImGui.SetTooltip($"{bonus.Category} | {bonus.Id}");
+                    ImGui.SetTooltip($"{bonus.Category} | {bonus.Id}{DescribeOtherRole(group, role, bonus.Id)}");
             }
 
             if (bonuses.Count == 0)
                 ImGui.TextDisabled("No bonuses match the search.");
+
+            ImGui.PopStyleColor();
         }
 
         ImGui.EndChild();
+    }
+
+    private void DrawMinimumInput(string label, int current, Action<int> setValue)
+    {
+        var value = current;
+        ImGui.SetNextItemWidth(90);
+        if (ImGui.InputInt(label, ref value, 1, 1))
+        {
+            setValue(Math.Clamp(value, 1, 20));
+            MarkMatchingSettingsChanged();
+        }
+    }
+
+    // Bonus roles are independent toggles. Require is an additional AND gate, while Exclude
+    // is a soft NOT/veto gate. Exclude intentionally does not delete Match or Require selections:
+    // users can temporarily block a bonus and later clear Exclude to restore the previous rule.
+    private void SetBonusRole(TabletRuleGroup group, BonusRole role, string bonusId, bool selected)
+    {
+        var list = GetBonusRoleList(group, role);
+        var changed = selected
+            ? AddBonusId(list, bonusId)
+            : RemoveBonusId(list, bonusId);
+
+        if (changed)
+            MarkMatchingSettingsChanged();
+    }
+
+    private static string DescribeOtherRole(TabletRuleGroup group, BonusRole role, string bonusId)
+    {
+        var isInMatch = group.SelectedBonusIds.Contains(bonusId, StringComparer.OrdinalIgnoreCase);
+        var isInRequire = group.RequiredBonusIds.Contains(bonusId, StringComparer.OrdinalIgnoreCase);
+        var isInExclude = group.ExcludedBonusIds.Contains(bonusId, StringComparer.OrdinalIgnoreCase);
+
+        return role switch
+        {
+            BonusRole.Match when isInRequire && isInExclude => "\nAlso required. Currently excluded, so this bonus acts as a temporary veto until Exclude is cleared.",
+            BonusRole.Match when isInRequire => "\nAlso required by this group.",
+            BonusRole.Match when isInExclude => "\nCurrently excluded, so this Match entry is temporarily vetoed until Exclude is cleared.",
+            BonusRole.Require when isInMatch && isInExclude => "\nAlso in Match. Currently excluded, so this requirement is temporarily vetoed until Exclude is cleared.",
+            BonusRole.Require when isInMatch => "\nAlso in Match. Selecting here keeps the Match selection.",
+            BonusRole.Require when isInExclude => "\nCurrently excluded, so this Require entry is temporarily vetoed until Exclude is cleared.",
+            BonusRole.Exclude when isInMatch || isInRequire => "\nAlso selected in Match/Require. Exclude is a soft veto and will not remove those selections.",
+            _ => string.Empty
+        };
+    }
+
+    private static bool AddBonusId(List<string> list, string bonusId)
+    {
+        if (list == null || string.IsNullOrWhiteSpace(bonusId) || list.Contains(bonusId, StringComparer.OrdinalIgnoreCase))
+            return false;
+
+        list.Add(bonusId);
+        return true;
+    }
+
+    private static bool RemoveBonusId(List<string> list, string bonusId)
+    {
+        return list.RemoveAll(x => string.Equals(x, bonusId, StringComparison.OrdinalIgnoreCase)) > 0;
+    }
+
+    private static List<string> GetBonusRoleList(TabletRuleGroup group, BonusRole role)
+    {
+        return role switch
+        {
+            BonusRole.Require => group.RequiredBonusIds,
+            BonusRole.Exclude => group.ExcludedBonusIds,
+            _ => group.SelectedBonusIds
+        };
+    }
+
+    private static Vector4 GetBonusRoleAccent(BonusRole role)
+    {
+        return role switch
+        {
+            BonusRole.Require => new Vector4(0.40f, 0.80f, 1.00f, 1f), // cyan: required "AND"
+            BonusRole.Exclude => new Vector4(1.00f, 0.45f, 0.45f, 1f), // red: excluded "NOT"
+            _ => new Vector4(0.55f, 0.90f, 0.55f, 1f)                  // green: wanted "match"
+        };
+    }
+
+    private static string BuildGroupHeader(TabletRuleGroup group)
+    {
+        var match = group.SelectedBonusIds?.Count ?? 0;
+        var require = group.RequiredBonusIds?.Count ?? 0;
+        var exclude = group.ExcludedBonusIds?.Count ?? 0;
+
+        // No Match bonuses but Exclude set -> the group acts as a blocklist.
+        if (match == 0 && exclude > 0)
+            return $"{group.Name}  [blocklist | {exclude} excl]";
+
+        var badge = $"{match} match";
+        if (require > 0)
+            badge += $" | {require} req";
+        if (exclude > 0)
+            badge += $" | {exclude} excl";
+
+        return $"{group.Name}  [{badge}]";
+    }
+
+    private static void HelpText(string text)
+    {
+        ImGui.PushStyleColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]);
+        ImGui.TextWrapped(text);
+        ImGui.PopStyleColor();
     }
 
     private void DrawDebugSettings()
@@ -1001,13 +1139,42 @@ public class TabletHelper : BaseSettingsPlugin<TabletHelperSettings>
             return results;
         }
 
-        foreach (var typeSettings in GetMatchingRuleScopes(tablet.TabletTypeKey))
-            AddMatchesForRuleScope(tablet, typeSettings, results);
+        // A blocklist (exclude-only) group suppresses the tablet entirely, before any group can match.
+        if (!IsTabletBlocked(tablet))
+        {
+            foreach (var typeSettings in GetMatchingRuleScopes(tablet.TabletTypeKey))
+                AddMatchesForRuleScope(tablet, typeSettings, results);
 
-        PrioritizeHighlightMatches(results);
+            PrioritizeHighlightMatches(results);
+        }
 
         _matchCache[tablet.Key] = new CachedTabletMatches(_settingsVersion, results);
         return results;
+    }
+
+    // An "exclude-only" group (no Match bonuses, but with Exclude bonuses) acts as a blocklist:
+    // if the tablet carries any of its excluded bonuses it is never highlighted, overriding every
+    // other group. A blocklist in the Global tab blocks all tablets; in a tablet tab it blocks that type.
+    private bool IsTabletBlocked(TabletItem tablet)
+    {
+        foreach (var typeSettings in GetMatchingRuleScopes(tablet.TabletTypeKey))
+        {
+            if (typeSettings == null || !typeSettings.Enabled || typeSettings.Groups == null)
+                continue;
+
+            foreach (var group in typeSettings.Groups)
+            {
+                group.EnsureDefaults();
+
+                if (!group.Enabled || group.SelectedBonusIds.Count > 0 || group.ExcludedBonusIds.Count == 0)
+                    continue;
+
+                if (CountMatchingBonuses(tablet, typeSettings.Key, group.ExcludedBonusIds) > 0)
+                    return true;
+            }
+        }
+
+        return false;
     }
 
     private IEnumerable<TabletTypeSettings> GetMatchingRuleScopes(string tabletTypeKey)
@@ -1040,20 +1207,53 @@ public class TabletHelper : BaseSettingsPlugin<TabletHelperSettings>
             if (tablet.UsesLeft < group.MinimumUsesLeft)
                 continue;
 
-            var matchedBonuses = 0;
-            foreach (var bonusId in group.SelectedBonusIds.Distinct(StringComparer.OrdinalIgnoreCase))
-            {
-                var bonus = TabletBonusCatalog.Find(typeSettings.Key, bonusId);
-                if (bonus == null)
-                    continue;
+            var matchedBonuses = CountMatchingBonuses(tablet, typeSettings.Key, group.SelectedBonusIds);
+            if (matchedBonuses < group.MinimumMatchedBonuses)
+                continue;
 
-                if (bonus.Matches(tablet))
-                    matchedBonuses++;
-            }
+            // Optional "AND" gate: the tablet must also carry the required bonuses.
+            if (group.RequiredBonusIds.Count > 0 &&
+                CountMatchingBonuses(tablet, typeSettings.Key, group.RequiredBonusIds) < group.MinimumRequiredBonuses)
+                continue;
 
-            if (matchedBonuses >= group.MinimumMatchedBonuses)
-                results.Add(new TabletMatchResult(group, matchedBonuses));
+            // Optional "NOT" gate: skip if the tablet carries any excluded bonus.
+            if (group.ExcludedBonusIds.Count > 0 &&
+                CountMatchingBonuses(tablet, typeSettings.Key, group.ExcludedBonusIds) > 0)
+                continue;
+
+            results.Add(new TabletMatchResult(group, matchedBonuses));
         }
+    }
+
+    private static int CountMatchingBonuses(TabletItem tablet, string tabletTypeKey, IReadOnlyList<string> bonusIds)
+    {
+        if (bonusIds == null || bonusIds.Count == 0)
+            return 0;
+
+        var count = 0;
+        for (var i = 0; i < bonusIds.Count; i++)
+        {
+            var bonusId = bonusIds[i];
+            if (string.IsNullOrWhiteSpace(bonusId) || HasEarlierBonusId(bonusIds, bonusId, i))
+                continue;
+
+            var bonus = TabletBonusCatalog.Find(tabletTypeKey, bonusId);
+            if (bonus != null && bonus.Matches(tablet))
+                count++;
+        }
+
+        return count;
+    }
+
+    private static bool HasEarlierBonusId(IReadOnlyList<string> bonusIds, string bonusId, int currentIndex)
+    {
+        for (var i = 0; i < currentIndex; i++)
+        {
+            if (string.Equals(bonusIds[i], bonusId, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
     }
 
     private static void PrioritizeHighlightMatches(List<TabletMatchResult> results)
@@ -1157,26 +1357,64 @@ public class TabletHelper : BaseSettingsPlugin<TabletHelperSettings>
         if (matches.Count == 0)
             return;
 
+        var drawList = ImGui.GetForegroundDrawList();
+        var font = ImGui.GetFont();
+        var fontSize = GetLabelFontSize();
+        var lineHeight = GetLabelLineHeight();
         var x = tablet.Rect.Left + 3;
         var y = tablet.Rect.Top + 2;
-        var lineHeight = Math.Max(10f, 14f * Settings.LabelScale.Value);
 
         for (var i = 0; i < matches.Count; i++)
         {
-            var label = matches[i].Group.Name;
+            var group = matches[i].Group;
+            var label = group.Name;
             if (Settings.ShowUsesLeft.Value)
                 label += $" ({tablet.UsesLeft})";
 
-            Graphics.DrawText(label, new Vector2(x, y + i * lineHeight), FontAlign.Left);
+            var position = new Vector2(x, y + i * lineHeight);
+            var textSize = GetScaledTextSize(label, fontSize);
+
+            if (Settings.LabelBackgroundEnabled.Value)
+            {
+                const float paddingX = 3f;
+                const float paddingY = 1f;
+                var alpha = Math.Clamp(Settings.LabelBackgroundAlpha.Value, 0, 255);
+                var backgroundColor = ToImGuiColor(Color.FromArgb(alpha, 0, 0, 0));
+                drawList.AddRectFilled(
+                    new Vector2(position.X - paddingX, position.Y - paddingY),
+                    new Vector2(position.X + textSize.X + paddingX, position.Y + textSize.Y + paddingY),
+                    backgroundColor,
+                    2f);
+            }
+
+            var textColor = GetLabelTextColor(group.Color);
+            if (Settings.LabelOutlineEnabled.Value)
+                DrawOutlinedText(drawList, font, fontSize, position, textColor, label);
+            else
+                drawList.AddText(font, fontSize, position, textColor, label);
         }
     }
 
-    private void DrawHighlight(RectangleF rect, Color color, ItemLocation location)
+    private void DrawHighlight(TabletItem tablet, IReadOnlyList<TabletMatchResult> matches)
     {
-        if (location == ItemLocation.QuadStash)
-            color = Color.FromArgb(color.A, color.R, color.G, color.B);
+        if (matches.Count == 0)
+            return;
 
-        DrawBorderHighlight(rect, color, Settings.BorderThickness.Value);
+        var color = matches[0].Group.Color;
+        var thickness = Math.Clamp(Settings.BorderThickness.Value, Settings.BorderThickness.Min, Settings.BorderThickness.Max);
+
+        switch (Settings.HighlightMode)
+        {
+            case TabletHighlightMode.Cross:
+                DrawCrossHighlight(tablet.Rect, color, thickness);
+                break;
+            case TabletHighlightMode.Star:
+                DrawStarHighlight(tablet, matches, color, thickness);
+                break;
+            default:
+                DrawBorderHighlight(tablet.Rect, color, thickness);
+                break;
+        }
     }
 
     private void DrawBorderHighlight(RectangleF rect, Color color, int thickness)
@@ -1188,6 +1426,118 @@ public class TabletHelper : BaseSettingsPlugin<TabletHelperSettings>
         var innerHeight = (int)rect.Height - 1 - scale;
         var scaledFrame = new RectangleF(innerX, innerY, innerWidth, innerHeight);
         Graphics.DrawFrame(scaledFrame, color, thickness);
+    }
+
+    private static void DrawCrossHighlight(RectangleF rect, Color color, int thickness)
+    {
+        var drawList = ImGui.GetForegroundDrawList();
+        var lineColor = ToImGuiColor(color);
+        var shadowColor = ToImGuiColor(Color.FromArgb(180, 0, 0, 0));
+        var inset = Math.Max(2f, thickness);
+
+        var topLeft = new Vector2(rect.Left + inset, rect.Top + inset);
+        var topRight = new Vector2(rect.Left + rect.Width - inset, rect.Top + inset);
+        var bottomLeft = new Vector2(rect.Left + inset, rect.Top + rect.Height - inset);
+        var bottomRight = new Vector2(rect.Left + rect.Width - inset, rect.Top + rect.Height - inset);
+        var shadowOffset = new Vector2(1f, 1f);
+
+        drawList.AddLine(topLeft + shadowOffset, bottomRight + shadowOffset, shadowColor, thickness + 2f);
+        drawList.AddLine(topRight + shadowOffset, bottomLeft + shadowOffset, shadowColor, thickness + 2f);
+        drawList.AddLine(topLeft, bottomRight, lineColor, thickness);
+        drawList.AddLine(topRight, bottomLeft, lineColor, thickness);
+    }
+
+    private void DrawStarHighlight(TabletItem tablet, IReadOnlyList<TabletMatchResult> matches, Color color, int thickness)
+    {
+        var rect = tablet.Rect;
+        var labelLines = Settings.ShowGroupLabel.Value && tablet.Location != ItemLocation.QuadStash ? matches.Count : 0;
+        var labelOffset = labelLines > 0 ? labelLines * GetLabelLineHeight() + 4f : 0f;
+        var outerRadius = Math.Clamp(Math.Min(rect.Width, rect.Height) * 0.18f, 7f, 13f);
+        var innerRadius = outerRadius * 0.45f;
+        var centerX = rect.Left + outerRadius + 5f;
+        var preferredCenterY = rect.Top + outerRadius + 5f + labelOffset;
+        var maxCenterY = rect.Top + rect.Height - outerRadius - 4f;
+        var centerY = Math.Min(preferredCenterY, maxCenterY);
+        var center = new Vector2(centerX, centerY);
+
+        var drawList = ImGui.GetForegroundDrawList();
+        var starColor = ToImGuiColor(color);
+        var shadowColor = ToImGuiColor(Color.FromArgb(190, 0, 0, 0));
+        var shadowOffset = new Vector2(1f, 1f);
+        var starThickness = Math.Max(2f, thickness);
+
+        DrawStarLines(drawList, center + shadowOffset, outerRadius, innerRadius, shadowColor, starThickness + 2f);
+        DrawStarLines(drawList, center, outerRadius, innerRadius, starColor, starThickness);
+    }
+
+    private static void DrawStarLines(ImDrawListPtr drawList, Vector2 center, float outerRadius, float innerRadius, uint color, float thickness)
+    {
+        var previous = GetStarPoint(center, outerRadius, innerRadius, 9);
+        for (var i = 0; i < 10; i++)
+        {
+            var next = GetStarPoint(center, outerRadius, innerRadius, i);
+            drawList.AddLine(previous, next, color, thickness);
+            previous = next;
+        }
+    }
+
+    private static Vector2 GetStarPoint(Vector2 center, float outerRadius, float innerRadius, int index)
+    {
+        var angle = -MathF.PI / 2f + index * MathF.PI / 5f;
+        var radius = index % 2 == 0 ? outerRadius : innerRadius;
+        return new Vector2(
+            center.X + MathF.Cos(angle) * radius,
+            center.Y + MathF.Sin(angle) * radius);
+    }
+
+    private float GetLabelFontSize()
+    {
+        var scale = Math.Clamp(Settings.LabelScale.Value, 0.5f, 2.0f);
+        return Math.Max(8f, ImGui.GetFontSize() * scale);
+    }
+
+    private float GetLabelLineHeight()
+    {
+        return Math.Max(10f, GetLabelFontSize() + 2f);
+    }
+
+    private uint GetLabelTextColor(Color groupColor)
+    {
+        if (Settings.LabelTextMode == TabletLabelTextMode.GroupColor)
+            return ToImGuiColor(Color.FromArgb(255, groupColor.R, groupColor.G, groupColor.B));
+
+        return ToImGuiColor(Color.White);
+    }
+
+    private static Vector2 GetScaledTextSize(string text, float fontSize)
+    {
+        var baseSize = ImGui.CalcTextSize(text ?? string.Empty);
+        var baseFontSize = Math.Max(1f, ImGui.GetFontSize());
+        var scale = fontSize / baseFontSize;
+        return new Vector2(baseSize.X * scale, baseSize.Y * scale);
+    }
+
+    private static void DrawOutlinedText(ImDrawListPtr drawList, ImFontPtr font, float fontSize, Vector2 position, uint color, string text)
+    {
+        var outlineColor = ToImGuiColor(Color.FromArgb(230, 0, 0, 0));
+        var offset = Math.Max(1f, fontSize / 16f);
+
+        drawList.AddText(font, fontSize, new Vector2(position.X - offset, position.Y), outlineColor, text);
+        drawList.AddText(font, fontSize, new Vector2(position.X + offset, position.Y), outlineColor, text);
+        drawList.AddText(font, fontSize, new Vector2(position.X, position.Y - offset), outlineColor, text);
+        drawList.AddText(font, fontSize, new Vector2(position.X, position.Y + offset), outlineColor, text);
+        drawList.AddText(font, fontSize, new Vector2(position.X - offset, position.Y - offset), outlineColor, text);
+        drawList.AddText(font, fontSize, new Vector2(position.X + offset, position.Y + offset), outlineColor, text);
+        drawList.AddText(font, fontSize, position, color, text);
+    }
+
+    private static uint ToImGuiColor(Color color)
+    {
+        return ImGui.ColorConvertFloat4ToU32(new Vector4(
+            color.R / 255f,
+            color.G / 255f,
+            color.B / 255f,
+            color.A / 255f));
     }
 
     private void LoadExistingDebugKeys()
@@ -1461,6 +1811,38 @@ public class TabletHelper : BaseSettingsPlugin<TabletHelperSettings>
             node.Value = value;
     }
 
+    private static void DrawEnumCombo<TEnum>(string label, TEnum current, Action<TEnum> setValue) where TEnum : struct, Enum
+    {
+        var preview = GetEnumDisplayName(current);
+        if (!ImGui.BeginCombo(label, preview))
+            return;
+
+        foreach (var value in Enum.GetValues<TEnum>())
+        {
+            var selected = EqualityComparer<TEnum>.Default.Equals(value, current);
+            if (ImGui.Selectable(GetEnumDisplayName(value), selected))
+                setValue(value);
+
+            if (selected)
+                ImGui.SetItemDefaultFocus();
+        }
+
+        ImGui.EndCombo();
+    }
+
+    private static string GetEnumDisplayName<TEnum>(TEnum value) where TEnum : struct, Enum
+    {
+        return (object)value switch
+        {
+            TabletHighlightMode.Border => "Border around tablet",
+            TabletHighlightMode.Cross => "X across tablet",
+            TabletHighlightMode.Star => "Star marker",
+            TabletLabelTextMode.White => "White",
+            TabletLabelTextMode.GroupColor => "Group color",
+            _ => value.ToString()
+        };
+    }
+
     private static bool DrawColorEdit(string label, Color color, Action<Color> setColor)
     {
         var vec = new Vector4(color.R / 255f, color.G / 255f, color.B / 255f, color.A / 255f);
@@ -1492,6 +1874,13 @@ public class TabletHelper : BaseSettingsPlugin<TabletHelperSettings>
 
         _matchCache.Clear();
     }
+}
+
+internal enum BonusRole
+{
+    Match,
+    Require,
+    Exclude
 }
 
 internal sealed class CachedTabletMatches

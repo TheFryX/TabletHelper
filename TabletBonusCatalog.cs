@@ -102,6 +102,8 @@ internal static class TabletBonusCatalog
 
         [TabletTypeKeys.Breach] = new List<TabletBonusDefinition>
         {
+            B("TowerPackSizeIncrease", "Breaches in Map have increased Pack Size", Common, N("TowerPackSizeIncrease")),
+
             B("TowerBreachAdditionalRares", "Unstable Breaches spawn an additional Rare Monster when Stabilised", Mechanic, N("TowerBreachAdditionalRares")),
             B("TowerBreachBossChance", "Unstable Breaches have increased chance to contain Vruun, Marshal of Xesht", Mechanic, N("TowerBreachBossChance")),
             B("TowerBreachWombgiftLevelChance", "Wombgifts have chance to drop one Level higher", Mechanic, N("TowerBreachWombgiftLevelChance")),
@@ -219,9 +221,10 @@ internal static class TabletBonusCatalog
 
         foreach (var type in TabletTypeSettings.CreateDefaults().Where(x => !IsGlobalTypeKey(x.Key)))
         {
-            var list = new List<TabletBonusDefinition>(CommonBonuses);
+            var list = new List<TabletBonusDefinition>();
             if (SpecificBonuses.TryGetValue(type.Key, out var specific))
                 list.AddRange(specific);
+            list.AddRange(CommonBonuses);
 
             result[type.Key] = BuildDistinctSortedBonusList(list);
         }
